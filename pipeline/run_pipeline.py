@@ -62,6 +62,10 @@ def filter_data(cfg, model_base, harmful_train, harmless_train, harmful_val, har
 
 def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train):
     """Generate and save candidate directions."""
+    if os.path.exists(os.path.join(cfg.artifact_path(), 'generate_directions/mean_diffs.pt')):
+        print("Candidate directions already exist, skipping generation...")
+        return torch.load(os.path.join(cfg.artifact_path(), 'generate_directions/mean_diffs.pt'))
+
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'generate_directions')):
         os.makedirs(os.path.join(cfg.artifact_path(), 'generate_directions'))
 
@@ -77,6 +81,12 @@ def generate_and_save_candidate_directions(cfg, model_base, harmful_train, harml
 
 def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions):
     """Select and save the direction."""
+    if os.path.exists(os.path.join(cfg.artifact_path(), 'direction.pt')):
+        print("Direction already selected and saved, skipping selection...")
+        with open(f'{cfg.artifact_path()}/direction_metadata.json', "r") as f:
+            metadata = json.load(f)
+        return metadata["pos"], metadata["layer"], torch.load(f'{cfg.artifact_path()}/direction.pt')
+
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'select_direction')):
         os.makedirs(os.path.join(cfg.artifact_path(), 'select_direction'))
 
@@ -97,6 +107,11 @@ def select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candid
 
 def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label, dataset_name, dataset=None):
     """Generate and save completions for a dataset."""
+    completion_path = f'{cfg.artifact_path()}/completions/{dataset_name}_{intervention_label}_completions.json'
+    if os.path.exists(completion_path):
+        print(f"Completions already exist at {completion_path}, skipping generation...")
+        return
+
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'completions')):
         os.makedirs(os.path.join(cfg.artifact_path(), 'completions'))
 
@@ -110,6 +125,11 @@ def generate_and_save_completions_for_dataset(cfg, model_base, fwd_pre_hooks, fw
 
 def evaluate_completions_and_save_results_for_dataset(cfg, intervention_label, dataset_name, eval_methodologies):
     """Evaluate completions and save results for a dataset."""
+    eval_path = f'{cfg.artifact_path()}/completions/{dataset_name}_{intervention_label}_evaluations.json'
+    if os.path.exists(eval_path):
+        print(f"Evaluations already exist at {eval_path}, skipping evaluation...")
+        return
+
     with open(os.path.join(cfg.artifact_path(), f'completions/{dataset_name}_{intervention_label}_completions.json'), 'r') as f:
         completions = json.load(f)
 
@@ -124,6 +144,11 @@ def evaluate_completions_and_save_results_for_dataset(cfg, intervention_label, d
 
 def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, intervention_label):
     """Evaluate loss on datasets."""
+    loss_path = f'{cfg.artifact_path()}/loss_evals/{intervention_label}_loss_eval.json'
+    if os.path.exists(loss_path):
+        print(f"Loss evaluation already exists at {loss_path}, skipping evaluation...")
+        return
+
     if not os.path.exists(os.path.join(cfg.artifact_path(), 'loss_evals')):
         os.makedirs(os.path.join(cfg.artifact_path(), 'loss_evals'))
 
@@ -137,7 +162,7 @@ def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, interv
 def run_pipeline(model_path, ablation_method="baseline"):
     """Run the full pipeline."""
     model_alias = os.path.basename(model_path)
-    cfg = Config(model_alias=model_alias, model_path=model_path)
+    cfg = Config(model_alias=model_alias, model_path=model_path, ablation_method=ablation_method)
 
     model_base = construct_model_base(cfg.model_path)
 
@@ -158,23 +183,40 @@ def run_pipeline(model_path, ablation_method="baseline"):
         random.seed(42)
         truthful_instructions = random.sample(truthful_instructions, min(cfg.n_train, len(truthful_instructions)))
         
-        # 1. Generate candidate refusal subspaces (max k=5)
-        candidate_subspaces = generate_multivector_directions(
-            model_base, harmful_train, harmless_train, truthful_instructions,
-            artifact_dir=os.path.join(cfg.artifact_path(), "generate_directions"),
-            k=5
-        )
+        # 1. Generate or load candidate refusal subspaces
+        cand_path = os.path.join(cfg.artifact_path(), 'generate_directions/candidate_subspaces.pt')
+        if os.path.exists(cand_path):
+            print("Candidate subspaces already exist, skipping generation...")
+            candidate_subspaces = torch.load(cand_path)
+        else:
+            if not os.path.exists(os.path.join(cfg.artifact_path(), 'generate_directions')):
+                os.makedirs(os.path.join(cfg.artifact_path(), 'generate_directions'))
+            candidate_subspaces = generate_multivector_directions(
+                model_base, harmful_train, harmless_train, truthful_instructions,
+                artifact_dir=os.path.join(cfg.artifact_path(), "generate_directions"),
+                k=5
+            )
+            torch.save(candidate_subspaces, cand_path)
         
-        # 2. Select the most effective multi-vector refusal subspace
-        pos, layer, k, subspace = select_multivector_direction(
-            model_base, harmful_val, harmless_val, candidate_subspaces,
-            artifact_dir=os.path.join(cfg.artifact_path(), "select_direction")
-        )
+        # 2. Select or load the most effective multi-vector refusal subspace
+        dir_path = os.path.join(cfg.artifact_path(), 'direction.pt')
+        meta_path = os.path.join(cfg.artifact_path(), 'direction_metadata.json')
+        if os.path.exists(dir_path) and os.path.exists(meta_path):
+            print("Direction already selected, skipping selection...")
+            with open(meta_path, "r") as f:
+                metadata = json.load(f)
+            pos, layer, k = metadata["pos"], metadata["layer"], metadata.get("k", 1)
+            subspace = torch.load(dir_path)
+        else:
+            pos, layer, k, subspace = select_multivector_direction(
+                model_base, harmful_val, harmless_val, candidate_subspaces,
+                artifact_dir=os.path.join(cfg.artifact_path(), "select_direction")
+            )
 
-        with open(f'{cfg.artifact_path()}/direction_metadata.json', "w") as f:
-            json.dump({"pos": pos, "layer": layer, "k": k}, f, indent=4)
-    
-        torch.save(subspace, f'{cfg.artifact_path()}/direction.pt')
+            with open(f'{cfg.artifact_path()}/direction_metadata.json', "w") as f:
+                json.dump({"pos": pos, "layer": layer, "k": k}, f, indent=4)
+        
+            torch.save(subspace, f'{cfg.artifact_path()}/direction.pt')
 
         baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
         ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_subspace_ablation_hooks(model_base, subspace)
