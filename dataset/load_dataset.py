@@ -34,6 +34,8 @@ def load_dataset(dataset_name, instructions_only: bool=False):
 
     if instructions_only:
         dataset = [d['instruction'] for d in dataset]
+
+    return dataset
  
 def load_truthful_qa(instructions_only: bool=False):
     from datasets import load_dataset as hf_load_dataset
