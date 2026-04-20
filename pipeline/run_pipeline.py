@@ -19,6 +19,7 @@ def parse_arguments():
     """Parse model path argument from command line."""
     parser = argparse.ArgumentParser(description="Parse model path argument.")
     parser.add_argument('--model_path', type=str, required=True, help='Path to the model')
+    parser.add_argument('--ablation_method', type=str, default='baseline', help='baseline or multivector')
     return parser.parse_args()
 
 def load_and_sample_datasets(cfg):
@@ -133,7 +134,7 @@ def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, interv
     with open(f'{cfg.artifact_path()}/loss_evals/{intervention_label}_loss_eval.json', "w") as f:
         json.dump(loss_evals, f, indent=4)
 
-def run_pipeline(model_path):
+def run_pipeline(model_path, ablation_method="baseline"):
     """Run the full pipeline."""
     model_alias = os.path.basename(model_path)
     cfg = Config(model_alias=model_alias, model_path=model_path)
@@ -146,45 +147,84 @@ def run_pipeline(model_path):
     # Filter datasets based on refusal scores
     harmful_train, harmless_train, harmful_val, harmless_val = filter_data(cfg, model_base, harmful_train, harmless_train, harmful_val, harmless_val)
 
-    # 1. Generate candidate refusal directions
-    candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
-    
-    # 2. Select the most effective refusal direction
-    pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
+    if ablation_method == "multivector":
+        from pipeline.submodules.generate_multivector_directions import generate_multivector_directions
+        from pipeline.submodules.select_multivector_direction import select_multivector_direction
+        from pipeline.utils.hook_utils import get_all_subspace_ablation_hooks
+        from dataset.load_dataset import load_truthful_qa
 
-    baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
-    ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)
-    actadd_fwd_pre_hooks, actadd_fwd_hooks = [(model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=-1.0))], []
+        truthful_instructions = load_truthful_qa(instructions_only=True)
+        # sample some
+        random.seed(42)
+        truthful_instructions = random.sample(truthful_instructions, min(cfg.n_train, len(truthful_instructions)))
+        
+        # 1. Generate candidate refusal subspaces (max k=5)
+        candidate_subspaces = generate_multivector_directions(
+            model_base, harmful_train, harmless_train, truthful_instructions,
+            artifact_dir=os.path.join(cfg.artifact_path(), "generate_directions"),
+            k=5
+        )
+        
+        # 2. Select the most effective multi-vector refusal subspace
+        pos, layer, k, subspace = select_multivector_direction(
+            model_base, harmful_val, harmless_val, candidate_subspaces,
+            artifact_dir=os.path.join(cfg.artifact_path(), "select_direction")
+        )
+
+        with open(f'{cfg.artifact_path()}/direction_metadata.json', "w") as f:
+            json.dump({"pos": pos, "layer": layer, "k": k}, f, indent=4)
+    
+        torch.save(subspace, f'{cfg.artifact_path()}/direction.pt')
+
+        baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
+        ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_subspace_ablation_hooks(model_base, subspace)
+        actadd_fwd_pre_hooks, actadd_fwd_hooks = [], [] # actadd is ambiguous for a subspace
+
+    else:
+        # 1. Generate candidate refusal directions
+        candidate_directions = generate_and_save_candidate_directions(cfg, model_base, harmful_train, harmless_train)
+        
+        # 2. Select the most effective refusal direction
+        pos, layer, direction = select_and_save_direction(cfg, model_base, harmful_val, harmless_val, candidate_directions)
+
+        baseline_fwd_pre_hooks, baseline_fwd_hooks = [], []
+        ablation_fwd_pre_hooks, ablation_fwd_hooks = get_all_direction_ablation_hooks(model_base, direction)
+        actadd_fwd_pre_hooks, actadd_fwd_hooks = [(model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=-1.0))], []
 
     # 3a. Generate and save completions on harmful evaluation datasets
     for dataset_name in cfg.evaluation_datasets:
         generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, 'baseline', dataset_name)
         generate_and_save_completions_for_dataset(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, 'ablation', dataset_name)
-        generate_and_save_completions_for_dataset(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, 'actadd', dataset_name)
+        if len(actadd_fwd_pre_hooks) > 0:
+            generate_and_save_completions_for_dataset(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, 'actadd', dataset_name)
 
     # 3b. Evaluate completions and save results on harmful evaluation datasets
     for dataset_name in cfg.evaluation_datasets:
         evaluate_completions_and_save_results_for_dataset(cfg, 'baseline', dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
         evaluate_completions_and_save_results_for_dataset(cfg, 'ablation', dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
-        evaluate_completions_and_save_results_for_dataset(cfg, 'actadd', dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
+        if len(actadd_fwd_pre_hooks) > 0:
+            evaluate_completions_and_save_results_for_dataset(cfg, 'actadd', dataset_name, eval_methodologies=cfg.jailbreak_eval_methodologies)
     
     # 4a. Generate and save completions on harmless evaluation dataset
     harmless_test = random.sample(load_dataset_split(harmtype='harmless', split='test'), cfg.n_test)
 
     generate_and_save_completions_for_dataset(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, 'baseline', 'harmless', dataset=harmless_test)
     
-    actadd_refusal_pre_hooks, actadd_refusal_hooks = [(model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=+1.0))], []
-    generate_and_save_completions_for_dataset(cfg, model_base, actadd_refusal_pre_hooks, actadd_refusal_hooks, 'actadd', 'harmless', dataset=harmless_test)
+    if ablation_method != "multivector":
+        actadd_refusal_pre_hooks, actadd_refusal_hooks = [(model_base.model_block_modules[layer], get_activation_addition_input_pre_hook(vector=direction, coeff=+1.0))], []
+        generate_and_save_completions_for_dataset(cfg, model_base, actadd_refusal_pre_hooks, actadd_refusal_hooks, 'actadd', 'harmless', dataset=harmless_test)
 
     # 4b. Evaluate completions and save results on harmless evaluation dataset
     evaluate_completions_and_save_results_for_dataset(cfg, 'baseline', 'harmless', eval_methodologies=cfg.refusal_eval_methodologies)
-    evaluate_completions_and_save_results_for_dataset(cfg, 'actadd', 'harmless', eval_methodologies=cfg.refusal_eval_methodologies)
+    if ablation_method != "multivector":
+        evaluate_completions_and_save_results_for_dataset(cfg, 'actadd', 'harmless', eval_methodologies=cfg.refusal_eval_methodologies)
 
     # 5. Evaluate loss on harmless datasets
     evaluate_loss_for_datasets(cfg, model_base, baseline_fwd_pre_hooks, baseline_fwd_hooks, 'baseline')
     evaluate_loss_for_datasets(cfg, model_base, ablation_fwd_pre_hooks, ablation_fwd_hooks, 'ablation')
-    evaluate_loss_for_datasets(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, 'actadd')
+    if len(actadd_fwd_pre_hooks) > 0:
+        evaluate_loss_for_datasets(cfg, model_base, actadd_fwd_pre_hooks, actadd_fwd_hooks, 'actadd')
 
 if __name__ == "__main__":
     args = parse_arguments()
-    run_pipeline(model_path=args.model_path)
+    run_pipeline(model_path=args.model_path, ablation_method=args.ablation_method)

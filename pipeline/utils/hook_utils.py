@@ -124,3 +124,55 @@ def get_activation_addition_input_pre_hook(vector: Float[Tensor, "d_model"], coe
         else:
             return activation
     return hook_fn
+
+def get_subspace_ablation_input_pre_hook(subspace: Float[Tensor, "k d_model"]):
+    def hook_fn(module, input):
+        nonlocal subspace
+
+        if isinstance(input, tuple):
+            activation: Float[Tensor, "batch_size seq_len d_model"] = input[0]
+        else:
+            activation: Float[Tensor, "batch_size seq_len d_model"] = input
+
+        subspace = subspace.to(activation) 
+        # project onto the subspace
+        # activation @ subspace.T gives shape [batch_size, seq_len, k]
+        # then multiply by subspace to project back to d_model space
+        projection = (activation @ subspace.T) @ subspace
+        activation -= projection
+
+        if isinstance(input, tuple):
+            return (activation, *input[1:])
+        else:
+            return activation
+    return hook_fn
+
+def get_subspace_ablation_output_hook(subspace: Float[Tensor, "k d_model"]):
+    def hook_fn(module, input, output):
+        nonlocal subspace
+
+        if isinstance(output, tuple):
+            activation: Float[Tensor, "batch_size seq_len d_model"] = output[0]
+        else:
+            activation: Float[Tensor, "batch_size seq_len d_model"] = output
+
+        subspace = subspace.to(activation)
+        projection = (activation @ subspace.T) @ subspace
+        activation -= projection
+
+        if isinstance(output, tuple):
+            return (activation, *output[1:])
+        else:
+            return activation
+
+    return hook_fn
+
+def get_all_subspace_ablation_hooks(
+    model_base,
+    subspace: Float[Tensor, 'k d_model'],
+):
+    fwd_pre_hooks = [(model_base.model_block_modules[layer], get_subspace_ablation_input_pre_hook(subspace=subspace)) for layer in range(model_base.model.config.num_hidden_layers)]
+    fwd_hooks = [(model_base.model_attn_modules[layer], get_subspace_ablation_output_hook(subspace=subspace)) for layer in range(model_base.model.config.num_hidden_layers)]
+    fwd_hooks += [(model_base.model_mlp_modules[layer], get_subspace_ablation_output_hook(subspace=subspace)) for layer in range(model_base.model.config.num_hidden_layers)]
+
+    return fwd_pre_hooks, fwd_hooks
