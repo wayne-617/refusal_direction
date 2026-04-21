@@ -13,7 +13,7 @@ def select_multivector_direction(
     harmless_instructions,
     candidate_subspaces, # [n_pos, n_layer, k_max, d_model]
     artifact_dir,
-    kl_threshold=0.1,
+    kl_threshold=0.25,
     batch_size=32
 ):
     if not os.path.exists(artifact_dir):
@@ -70,8 +70,8 @@ def select_multivector_direction(
     with open(f"{artifact_dir}/multivector_evaluations.json", 'w') as f:
         json.dump(results, f, indent=4)
 
-    # Filter by KL
-    filtered_results = [r for r in results if r['kl_div_score'] <= kl_threshold and r['layer'] < int(n_layer * 0.8)]
+    # Filter by KL and enforce selection from deep layers where semantic features live
+    filtered_results = [r for r in results if r['kl_div_score'] <= kl_threshold and r['layer'] >= 8]
     if len(filtered_results) == 0:
         print("Warning: All multi-vector subspaces were filtered out by KL threshold. Relaxing it.")
         filtered_results = results

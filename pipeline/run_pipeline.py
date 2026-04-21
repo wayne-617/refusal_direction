@@ -3,6 +3,9 @@ import random
 import json
 import os
 import argparse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from dataset.load_dataset import load_dataset_split, load_dataset
 
