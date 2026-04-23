@@ -1,0 +1,11 @@
+{
+    "base_model": {
+        "mc2": 0.45831308561597595
+    },
+    "baseline_ablation": {
+        "mc2": 0.41220924318841995
+    },
+    "multivector_ablation": {
+        "mc2": 0.45098581771409274
+    }
+}

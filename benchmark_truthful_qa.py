@@ -77,5 +77,14 @@ def benchmark_truthfulqa():
     print(f"Baseline Ablation:    MC2 {baseline_results['mc2']*100:.1f}%")
     print(f"Multivector Ablation: MC2 {multi_results['mc2']*100:.1f}%")
 
+    out_path = os.path.join(base_dir, "truthfulqa_benchmark.json")
+    with open(out_path, "w") as f:
+        json.dump({
+            "base_model": base_results,
+            "baseline_ablation": baseline_results,
+            "multivector_ablation": multi_results
+        }, f, indent=4)
+    print(f"\n[+] Results successfully saved to: {out_path}")
+
 if __name__ == "__main__":
     benchmark_truthfulqa()
